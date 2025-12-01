@@ -1,73 +1,69 @@
 use anyhow::Result;
 use reqwest;
 use rmcp::{
-    ServerHandler, ServiceExt,
-    model::{ServerCapabilities, ServerInfo},
-    schemars, tool,
-    transport::stdio,
+    model::{ServerCapabilities, ServerInfo}, schemars,
+    tool,
+    transport::stdio, ServerHandler,
+    ServiceExt,
 };
 use serde;
 use tracing_subscriber::{self, EnvFilter};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
-const NWS_API_BASE: &str = "https://api.weather.gov";
+const NWS_API_BASE: &str = "https://restapi.amap.com/v3/weather/weatherInfo?parameters";
 const USE_AGENT: &str = "weather-app/1.0";
+const BIND_ADDRESS: &str = "127.0.0.1:8000";
 
-#[derive(Debug, serde::Deserialize)]
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AlertResponse {
-    pub features: Vec<Feature>,
-}
-#[derive(Debug, serde::Deserialize)]
-pub struct Feature {
-    pub properties: FeatureProps,
-}
-#[derive(Debug, serde::Deserialize)]
-pub struct FeatureProps {
-    pub event: String,
-    #[serde(rename = "areaDesc")]
-    pub area_desc: String,
-    pub severity: String,
     pub status: String,
-    pub headline: String,
+    pub count: String,
+    pub info: String,
+    pub infocode: String,
+    pub lives: Vec<Live>,
 }
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct PointsRequest {
-    #[schemars(description = "latitude of the location in decimal format")]
-    pub latitude: String,
-    #[schemars(description = "longitude of the location in decimal format")]
-    pub longitude: String,
+pub struct Live {
+    pub province: String,
+    pub city: String,
+    pub adcode: String,
+    pub weather: String,
+    pub temperature: String,
+    pub winddirection: String,
+    pub windpower: String,
+    pub humidity: String,
+    pub reporttime: String,
+    pub temperature_float: String,
+    pub humidity_float: String,
 }
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PointsResponse {
-    pub properties: PointsProps,
+    pub status: String,
+    pub count: String,
+    pub info: String,
+    pub infocode: String,
+    pub forecasts: Vec<Forecast>,
 }
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct PointsProps {
-    pub forecast: String,
+pub struct Forecast {
+    pub city: String,
+    pub casts: Vec<DayForecast>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GridPointsResponse {
-    pub properties: GridPointsProps,
+pub struct DayForecast {
+    pub date: String,
+    pub dayweather: String,
+    pub nightweather: String,
+    pub daytemp: String,
+    pub nighttemp: String,
+    pub daywind: String,
+    pub nightwind: String,
+    pub daypower: String,
+    pub nightpower: String,
 }
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GridPointsProps {
-    pub periods: Vec<Period>,
-}
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct Period {
-    pub name: String,
-    pub temperature: i32,
-    #[serde(rename = "temperatureUnit")]
-    pub temperature_unit: String,
-    #[serde(rename = "windSpeed")]
-    pub wind_speed: String,
-    #[serde(rename = "windDirection")]
-    pub wind_direction: String,
-    #[serde(rename = "shortForecast")]
-    pub short_forecast: String,
-}
-
-fn format_alerts(alerts: &[Feature]) -> String {
+fn format_alerts(alerts: &[Live]) -> String {
     if alerts.is_empty() {
         return "No active alerts found.".to_string();
     }
@@ -75,33 +71,33 @@ fn format_alerts(alerts: &[Feature]) -> String {
 
     for alert in alerts {
         result.push_str(&format!(
-            "Event: {}\nArea: {}\nSeverity: {}\nStatus: {}\nHeadline: {}\n---\n",
-            alert.properties.event,
-            alert.properties.area_desc,
-            alert.properties.severity,
-            alert.properties.status,
-            alert.properties.headline
+            "省份: {}\n城市: {}\n天气: {}\n温度: {}°\n风向: {}({})\n---\n",
+            alert.province,
+            alert.city,
+            alert.weather,
+            alert.temperature,
+            alert.winddirection,
+            alert.windpower
         ));
     }
     result
 }
 
-fn format_forecast(periods: &[Period]) -> String {
+fn format_forecast(periods: &[Forecast]) -> String {
     if periods.is_empty() {
         return "No forecast data available.".to_string();
     }
     let mut result = String::with_capacity(150 * periods.len());
 
     for period in periods {
-        result.push_str(&format!(
-            "Name: {}\nTemperature: {}°{}\nWind: {} {}\nForecast: {}\n---\n",
-            period.name,
-            period.temperature,
-            period.temperature_unit,
-            period.wind_speed,
-            period.wind_direction,
-            period.short_forecast
-        ));
+        for day in &period.casts {
+            result.push_str(&format!(
+                "日期: {}\n白天: {} {}° {}({}) \n夜间: {} {}° {}({})\n---\n",
+                day.date,
+                day.dayweather, day.daytemp, day.daywind, day.daypower,
+                day.nightweather, day.nighttemp, day.nightwind, day.nightpower
+            ));
+        }
     }
     result
 }
@@ -119,7 +115,7 @@ impl Weather {
             .expect("Failed to create HTTP client");
         Self { client }
     }
-
+    //key 3e7f6bcddfcbe0f1619f5842c9226908
     async fn make_request<T>(&self, url: &str) -> Result<T, String>
     where
         T: serde::de::DeserializeOwned,
@@ -143,17 +139,21 @@ impl Weather {
             status => Err(format!("Failed to make request to {}: {}", url, status)),
         }
     }
-    #[tool(description = "Get weather alert for a US state")]
+    #[tool(description = "获取当天，天气情况")]
     async fn get_alerts(
         &self,
         #[tool(param)]
-        #[schemars(description = "the US state to get alert for ")]
+        #[schemars(description = "城市编码")]
         state: String,
     ) -> String {
         tracing::info!("Received request for weather alerts in state: {}", state);
-        let url = format!("{}/alerts/active?area={}", NWS_API_BASE, state);
-        match self.make_request::<AlertResponse>(&url).await {
-            Ok(alerts) => format_alerts(&alerts.features),
+        let url = format!(
+            "{}&key=3e7f6bcddfcbe0f1619f5842c9226908&city={}&output=json",
+            NWS_API_BASE, state
+        );
+        let result = self.make_request::<AlertResponse>(&url).await;
+        match result {
+            Ok(alerts) => format_alerts(&alerts.lives),
             Err(e) => {
                 tracing::error!("Failed to fetch alerts: {}", e);
                 "No alerts found or an error occurred.".to_string()
@@ -161,39 +161,27 @@ impl Weather {
         }
     }
 
-    #[tool(description = "Get weather forecast using latitude and longitude coordinates")]
+    #[tool(description = "获取最近几天，天气预报")]
     async fn get_forecast(
         &self,
-        #[tool(aggr)] PointsRequest {
-            latitude,
-            longitude,
-        }: PointsRequest,
+        #[tool(param)]
+        #[schemars(description = "城市编码")]
+        city: String,
     ) -> String {
-        tracing::info!(
-            "Received request for forecast with latitude ={} and longitude = {} coordinates",
-            latitude,
-            longitude
+        tracing::info!("Received request for forecast with city code {}", city,);
+
+        let url = format!(
+            "{}&key=3e7f6bcddfcbe0f1619f5842c9226908&city={}&output=json&extensions=all",
+            NWS_API_BASE, city
         );
+        println!("111111 {}", url);
+        let points_result = self.make_request::<PointsResponse>(&url).await;
 
-        let points_url = format!("{}/points/{},{}", NWS_API_BASE, latitude, longitude);
-        let points_result = self.make_request::<PointsResponse>(&points_url).await;
-
-        let points = match points_result {
-            Ok(points) => points,
+        match points_result {
+            Ok(points) => format_forecast(&points.forecasts),
             Err(e) => {
                 tracing::error!("Failed to fetch points: {}", e);
                 return "No forecast found or an error occurred.".to_string();
-            }
-        };
-
-        match self
-            .make_request::<GridPointsResponse>(&points.properties.forecast)
-            .await
-        {
-            Ok(forecast) => format_forecast(&forecast.properties.periods),
-            Err(e) => {
-                tracing::error!("Failed to fetch forecast: {}", e);
-                "No forecast found or an error occurred.".to_string()
             }
         }
     }
@@ -211,12 +199,23 @@ impl ServerHandler for Weather {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logging with explicit configuration
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let file_appender = RollingFileAppender::new(
+        Rotation::DAILY,
+        "./logs",
+        "app.log"
+    );
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
+        .with_env_filter(env_filter)
+        .with_writer(file_appender)
+        .with_ansi(false)  // Enable ANSI colors for better visibility
+        .with_target(false)  // Disable target for cleaner output
         .init();
 
+    //
     tracing::info!("Starting weather MCP server");
 
     let service = Weather::new().serve(stdio()).await.inspect_err(|e| {
