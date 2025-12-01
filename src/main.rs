@@ -144,12 +144,12 @@ impl Weather {
         &self,
         #[tool(param)]
         #[schemars(description = "城市编码")]
-        state: String,
+        city: String,
     ) -> String {
-        tracing::info!("Received request for weather alerts in state: {}", state);
+        tracing::info!("Received request for weather alerts in state: {}", city);
         let url = format!(
             "{}&key=3e7f6bcddfcbe0f1619f5842c9226908&city={}&output=json",
-            NWS_API_BASE, state
+            NWS_API_BASE, city
         );
         let result = self.make_request::<AlertResponse>(&url).await;
         match result {
