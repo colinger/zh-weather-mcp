@@ -191,7 +191,7 @@ impl Weather {
 impl ServerHandler for Weather {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("A simple weather forecaster".into()),
+            instructions: Some("中国城市天气查询".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
